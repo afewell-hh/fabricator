@@ -36,6 +36,8 @@ type VLABBuilder struct {
 	BundledServers    uint8  // number of bundled servers to generate for switches (only for one of the second switch in the redundancy group or orphan switch)
 	NoSwitches        bool   // do not generate any switches
 	GatewayUplinks    uint8  // number of uplinks for gateway node to the spines
+	LeafProfile       string // switch profile for leaf switches
+	SpineProfile      string // switch profile for spine switches
 
 	data         *apiutil.Loader
 	ifaceTracker map[string]uint8 // next available interface ID for each switch
@@ -249,7 +251,7 @@ func (b *VLABBuilder) Build(ctx context.Context, l *apiutil.Loader, fabricMode m
 				Group: sg,
 				Type:  meta.RedundancyTypeMCLAG,
 			},
-		}); err != nil {
+		}, b.LeafProfile); err != nil {
 			return err
 		}
 		if _, err := b.createSwitch(ctx, leaf2Name, wiringapi.SwitchSpec{
@@ -260,7 +262,7 @@ func (b *VLABBuilder) Build(ctx context.Context, l *apiutil.Loader, fabricMode m
 				Group: sg,
 				Type:  meta.RedundancyTypeMCLAG,
 			},
-		}); err != nil {
+		}, b.LeafProfile); err != nil {
 			return err
 		}
 
@@ -394,7 +396,7 @@ func (b *VLABBuilder) Build(ctx context.Context, l *apiutil.Loader, fabricMode m
 					Group: sg,
 					Type:  meta.RedundancyTypeESLAG,
 				},
-			}); err != nil {
+			}, b.LeafProfile); err != nil {
 				return err
 			}
 		}
@@ -492,7 +494,7 @@ func (b *VLABBuilder) Build(ctx context.Context, l *apiutil.Loader, fabricMode m
 		if _, err := b.createSwitch(ctx, leafName, wiringapi.SwitchSpec{
 			Role:        wiringapi.SwitchRoleServerLeaf,
 			Description: fmt.Sprintf("VS-%02d", switchID),
-		}); err != nil {
+		}, b.LeafProfile); err != nil {
 			return err
 		}
 
@@ -558,7 +560,7 @@ func (b *VLABBuilder) Build(ctx context.Context, l *apiutil.Loader, fabricMode m
 		if _, err := b.createSwitch(ctx, spineName, wiringapi.SwitchSpec{
 			Role:        wiringapi.SwitchRoleSpine,
 			Description: fmt.Sprintf("VS-%02d", switchID),
-		}); err != nil {
+		}, b.SpineProfile); err != nil {
 			return err
 		}
 
@@ -686,8 +688,8 @@ func (b *VLABBuilder) createSwitchGroup(ctx context.Context, name string) (*wiri
 	return sg, nil
 }
 
-func (b *VLABBuilder) createSwitch(ctx context.Context, name string, spec wiringapi.SwitchSpec) (*wiringapi.Switch, error) { //nolint:unparam
-	spec.Profile = meta.SwitchProfileVS
+func (b *VLABBuilder) createSwitch(ctx context.Context, name string, spec wiringapi.SwitchSpec, profile string) (*wiringapi.Switch, error) { //nolint:unparam
+	spec.Profile = profile
 	spec.Boot.MAC = fmt.Sprintf(VLABSwitchMACTmpl, b.switchID)
 	b.switchID++
 
