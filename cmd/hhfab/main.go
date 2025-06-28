@@ -172,6 +172,7 @@ func Run(ctx context.Context) error {
 	var wgNoSwitches bool
 	var wgGatewayUplinks uint
 	var wgLeafProfile, wgSpineProfile string
+	var wgLeafBreakout, wgSpineBreakout string
 	vlabWiringGenFlags := []cli.Flag{
 		&cli.UintFlag{
 			Name:        "spines-count",
@@ -260,6 +261,16 @@ func Run(ctx context.Context) error {
 			Usage:       "switch profile for spine switches (default: vs)",
 			Destination: &wgSpineProfile,
 			Value:       "vs",
+		},
+		&cli.StringFlag{
+			Name:        "leaf-breakout",
+			Usage:       "leaf switch breakout configuration (e.g., \"1-8:4x25G,9-12:2x50G\")",
+			Destination: &wgLeafBreakout,
+		},
+		&cli.StringFlag{
+			Name:        "spine-breakout",
+			Usage:       "spine switch breakout configuration (e.g., \"1-4:4x25G\")",
+			Destination: &wgSpineBreakout,
 		},
 	}
 
@@ -710,6 +721,8 @@ func Run(ctx context.Context) error {
 								GatewayUplinks:    uint8(wgGatewayUplinks), //nolint:gosec
 								LeafProfile:       wgLeafProfile,
 								SpineProfile:      wgSpineProfile,
+								LeafBreakout:      wgLeafBreakout,
+								SpineBreakout:     wgSpineBreakout,
 							}
 
 							if err := hhfab.VLABGenerate(ctx, workDir, cacheDir, builder, hhfab.DefaultVLABGeneratedFile); err != nil {

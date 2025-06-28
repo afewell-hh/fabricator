@@ -39,6 +39,8 @@ type VLABBuilder struct {
 	GatewayUplinks    uint8  // number of uplinks for gateway node to the spines
 	LeafProfile       string // switch profile for leaf switches
 	SpineProfile      string // switch profile for spine switches
+	LeafBreakout      string // breakout configuration for leaf switches
+	SpineBreakout     string // breakout configuration for spine switches
 
 	data         *apiutil.Loader
 	ifaceTracker map[string]uint8 // next available interface ID for each switch
