@@ -14,6 +14,7 @@ import (
 	"go.githedgehog.com/fabric/api/meta"
 	vpcapi "go.githedgehog.com/fabric/api/vpc/v1beta1"
 	wiringapi "go.githedgehog.com/fabric/api/wiring/v1beta1"
+	"go.githedgehog.com/fabric/pkg/ctrl/switchprofile"
 	fabapi "go.githedgehog.com/fabricator/api/fabricator/v1beta1"
 	"go.githedgehog.com/fabricator/pkg/fab/comp"
 	"go.githedgehog.com/fabricator/pkg/util/apiutil"
@@ -49,6 +50,11 @@ func (b *VLABBuilder) Build(ctx context.Context, l *apiutil.Loader, fabricMode m
 		return fmt.Errorf("loader is nil") //nolint:goerr113
 	}
 	b.data = l
+
+	// Validate switch profiles
+	if err := b.validateSwitchProfiles(); err != nil {
+		return err
+	}
 
 	switch fabricMode {
 	case meta.FabricModeSpineLeaf:
@@ -666,6 +672,32 @@ func (b *VLABBuilder) nextServerPort(serverName string) string {
 	b.ifaceTracker[serverName] = ifaceID
 
 	return portName
+}
+
+// validateSwitchProfiles validates that the specified switch profiles exist in the catalog
+func (b *VLABBuilder) validateSwitchProfiles() error {
+	catalog := switchprofile.NewDefaultSwitchProfiles()
+
+	// Register all default profiles to build the catalog
+	if err := catalog.RegisterAll(context.Background(), nil, &meta.FabricConfig{}); err != nil {
+		return fmt.Errorf("failed to register switch profiles: %w", err) //nolint:goerr113
+	}
+
+	// Validate leaf profile
+	if b.LeafProfile != "" {
+		if profile := catalog.Get(b.LeafProfile); profile == nil {
+			return fmt.Errorf("invalid leaf switch profile '%s': profile not found", b.LeafProfile) //nolint:goerr113
+		}
+	}
+
+	// Validate spine profile
+	if b.SpineProfile != "" {
+		if profile := catalog.Get(b.SpineProfile); profile == nil {
+			return fmt.Errorf("invalid spine switch profile '%s': profile not found", b.SpineProfile) //nolint:goerr113
+		}
+	}
+
+	return nil
 }
 
 func (b *VLABBuilder) createSwitchGroup(ctx context.Context, name string) (*wiringapi.SwitchGroup, error) { //nolint:unparam
