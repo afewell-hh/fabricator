@@ -657,22 +657,73 @@ func (b *VLABBuilder) Build(ctx context.Context, l *apiutil.Loader, fabricMode m
 }
 
 func (b *VLABBuilder) nextSwitchPort(switchName string) string {
-	ifaceID := b.ifaceTracker[switchName]
-	portName := fmt.Sprintf("%s/E1/%d", switchName, ifaceID+1)
-
-	offset := 1
-	if ifaceID >= 48 {
-		offset = 4
-	}
-	ifaceID += uint8(offset) //nolint:gosec
-
-	if ifaceID > 76 {
-		slog.Error("Too many interfaces for switch", "switch", switchName)
+	// Initialize tracker if needed
+	if b.ifaceTracker == nil {
+		b.ifaceTracker = make(map[string]uint8)
 	}
 
-	b.ifaceTracker[switchName] = ifaceID
+	// Determine which breakout config to use based on switch role
+	var breakoutConfig map[uint8]string
+	if strings.Contains(switchName, "spine") {
+		breakoutConfig = b.spineBreakoutConfig
+	} else {
+		breakoutConfig = b.leafBreakoutConfig
+	}
 
-	return portName
+	// Get next available logical interface for this switch
+	logicalIface := b.ifaceTracker[switchName]
+
+	// Walk through physical ports to find where this logical interface maps
+	currentLogicalIface := uint8(0)
+	physicalPort := uint8(1)
+
+	for {
+		if breakoutMode, hasBreakout := breakoutConfig[physicalPort]; hasBreakout {
+			// This physical port has breakout
+			subPortCount := b.getBreakoutSubPortCount(breakoutMode)
+
+			if currentLogicalIface+subPortCount > logicalIface {
+				// We're in this breakout port's range
+				subPortIndex := logicalIface - currentLogicalIface + 1 // 1-based
+				portName := fmt.Sprintf("%s/E1/%d/%d", switchName, physicalPort, subPortIndex)
+				b.ifaceTracker[switchName] = logicalIface + 1
+				return portName
+			}
+			currentLogicalIface += subPortCount
+		} else {
+			// Regular port (no breakout)
+			if currentLogicalIface == logicalIface {
+				portName := fmt.Sprintf("%s/E1/%d", switchName, physicalPort)
+				b.ifaceTracker[switchName] = logicalIface + 1
+				return portName
+			}
+			currentLogicalIface++
+		}
+		physicalPort++
+
+		// Safety check to prevent infinite loop
+		if physicalPort > 64 {
+			slog.Error("Too many interfaces for switch", "switch", switchName)
+			portName := fmt.Sprintf("%s/E1/%d", switchName, physicalPort)
+			b.ifaceTracker[switchName] = logicalIface + 1
+			return portName
+		}
+	}
+}
+
+// getBreakoutSubPortCount returns the number of sub-ports for a given breakout mode
+func (b *VLABBuilder) getBreakoutSubPortCount(breakoutMode string) uint8 {
+	// Parse breakout mode like "4x25G" to get count
+	if strings.Contains(breakoutMode, "x") {
+		parts := strings.Split(breakoutMode, "x")
+		if len(parts) >= 1 {
+			if count, err := strconv.ParseUint(parts[0], 10, 8); err == nil {
+				return uint8(count) //nolint:gosec
+			}
+		}
+	}
+	// Default to 1 for modes like "1x100G" or invalid formats
+	return 1
 }
 
 func (b *VLABBuilder) nextServerPort(serverName string) string {
