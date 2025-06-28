@@ -3,6 +3,7 @@
 *kubeconfig.yaml
 lcov.info
 .zot
+ignore/*
 
 # Binaries for programs and plugins
 *.exe
