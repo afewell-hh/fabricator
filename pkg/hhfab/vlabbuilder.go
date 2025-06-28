@@ -45,6 +45,10 @@ type VLABBuilder struct {
 	data         *apiutil.Loader
 	ifaceTracker map[string]uint8 // next available interface ID for each switch
 	switchID     uint             // switch ID counter
+
+	// parsed breakout configurations
+	leafBreakoutConfig  map[uint8]string // port number -> breakout mode
+	spineBreakoutConfig map[uint8]string // port number -> breakout mode
 }
 
 func (b *VLABBuilder) Build(ctx context.Context, l *apiutil.Loader, fabricMode meta.FabricMode, nodes []fabapi.FabNode) error {
@@ -53,8 +57,12 @@ func (b *VLABBuilder) Build(ctx context.Context, l *apiutil.Loader, fabricMode m
 	}
 	b.data = l
 
-	// Validate switch profiles
+	// Validate switch profiles and parse breakout configurations
 	if err := b.validateSwitchProfiles(); err != nil {
+		return err
+	}
+
+	if err := b.parseBreakoutConfigurations(); err != nil {
 		return err
 	}
 
@@ -697,6 +705,141 @@ func (b *VLABBuilder) validateSwitchProfiles() error {
 		if profile := catalog.Get(b.SpineProfile); profile == nil {
 			return fmt.Errorf("invalid spine switch profile '%s': profile not found", b.SpineProfile) //nolint:goerr113
 		}
+	}
+
+	return nil
+}
+
+// parseBreakoutConfigurations parses and validates breakout specifications
+func (b *VLABBuilder) parseBreakoutConfigurations() error {
+	var err error
+
+	// Parse leaf breakout configuration
+	if b.LeafBreakout != "" {
+		b.leafBreakoutConfig, err = b.parseBreakoutSpec(b.LeafBreakout, b.LeafProfile)
+		if err != nil {
+			return fmt.Errorf("invalid leaf breakout configuration: %w", err) //nolint:goerr113
+		}
+	} else {
+		b.leafBreakoutConfig = make(map[uint8]string)
+	}
+
+	// Parse spine breakout configuration
+	if b.SpineBreakout != "" {
+		b.spineBreakoutConfig, err = b.parseBreakoutSpec(b.SpineBreakout, b.SpineProfile)
+		if err != nil {
+			return fmt.Errorf("invalid spine breakout configuration: %w", err) //nolint:goerr113
+		}
+	} else {
+		b.spineBreakoutConfig = make(map[uint8]string)
+	}
+
+	return nil
+}
+
+// parseBreakoutSpec parses a breakout specification string like "1-8:4x25G,9-12:2x50G"
+func (b *VLABBuilder) parseBreakoutSpec(spec string, profile string) (map[uint8]string, error) {
+	result := make(map[uint8]string)
+
+	// Get switch profile for validation
+	catalog := switchprofile.NewDefaultSwitchProfiles()
+	if err := catalog.RegisterAll(context.Background(), nil, &meta.FabricConfig{}); err != nil {
+		return nil, fmt.Errorf("failed to register switch profiles: %w", err) //nolint:goerr113
+	}
+
+	switchProfile := catalog.Get(profile)
+	if switchProfile == nil {
+		return nil, fmt.Errorf("switch profile '%s' not found", profile) //nolint:goerr113
+	}
+
+	// Split by comma to get individual port range configurations
+	configs := strings.Split(spec, ",")
+	for _, config := range configs {
+		config = strings.TrimSpace(config)
+		if config == "" {
+			continue
+		}
+
+		// Parse "1-8:4x25G" format
+		parts := strings.Split(config, ":")
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid breakout format '%s', expected 'range:mode'", config) //nolint:goerr113
+		}
+
+		portRange := strings.TrimSpace(parts[0])
+		breakoutMode := strings.TrimSpace(parts[1])
+
+		// Parse port range (e.g., "1-8" or "5")
+		var startPort, endPort uint8
+		if strings.Contains(portRange, "-") {
+			rangeParts := strings.Split(portRange, "-")
+			if len(rangeParts) != 2 {
+				return nil, fmt.Errorf("invalid port range '%s'", portRange) //nolint:goerr113
+			}
+
+			start, err := strconv.ParseUint(strings.TrimSpace(rangeParts[0]), 10, 8)
+			if err != nil {
+				return nil, fmt.Errorf("invalid start port '%s': %w", rangeParts[0], err) //nolint:goerr113
+			}
+
+			end, err := strconv.ParseUint(strings.TrimSpace(rangeParts[1]), 10, 8)
+			if err != nil {
+				return nil, fmt.Errorf("invalid end port '%s': %w", rangeParts[1], err) //nolint:goerr113
+			}
+
+			startPort = uint8(start) //nolint:gosec
+			endPort = uint8(end)     //nolint:gosec
+		} else {
+			// Single port
+			port, err := strconv.ParseUint(portRange, 10, 8)
+			if err != nil {
+				return nil, fmt.Errorf("invalid port '%s': %w", portRange, err) //nolint:goerr113
+			}
+			startPort = uint8(port) //nolint:gosec
+			endPort = startPort
+		}
+
+		if startPort > endPort {
+			return nil, fmt.Errorf("invalid range: start port %d > end port %d", startPort, endPort) //nolint:goerr113
+		}
+
+		// Validate breakout mode against switch profile
+		if err := b.validateBreakoutMode(switchProfile, startPort, breakoutMode); err != nil {
+			return nil, fmt.Errorf("invalid breakout mode '%s' for port %d: %w", breakoutMode, startPort, err) //nolint:goerr113
+		}
+
+		// Apply breakout mode to all ports in range
+		for port := startPort; port <= endPort; port++ {
+			result[port] = breakoutMode
+		}
+	}
+
+	return result, nil
+}
+
+// validateBreakoutMode validates that a breakout mode is supported by the switch profile
+func (b *VLABBuilder) validateBreakoutMode(switchProfile *wiringapi.SwitchProfile, port uint8, breakoutMode string) error {
+	// Find the port in the switch profile
+	portName := fmt.Sprintf("E1/%d", port)
+	switchPort, exists := switchProfile.Spec.Ports[portName]
+	if !exists {
+		return fmt.Errorf("port E1/%d not found in switch profile", port) //nolint:goerr113
+	}
+
+	// Get the port profile
+	portProfile, exists := switchProfile.Spec.PortProfiles[switchPort.Profile]
+	if !exists {
+		return fmt.Errorf("port profile '%s' not found", switchPort.Profile) //nolint:goerr113
+	}
+
+	// Check if breakout is supported
+	if portProfile.Breakout == nil {
+		return fmt.Errorf("port E1/%d does not support breakout", port) //nolint:goerr113
+	}
+
+	// Check if the specific breakout mode is supported
+	if _, exists := portProfile.Breakout.Supported[breakoutMode]; !exists {
+		return fmt.Errorf("breakout mode '%s' not supported by port E1/%d", breakoutMode, port) //nolint:goerr113
 	}
 
 	return nil
