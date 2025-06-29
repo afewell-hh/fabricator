@@ -41,14 +41,30 @@ type VLABBuilder struct {
 	SpineProfile      string // switch profile for spine switches
 	LeafBreakout      string // breakout configuration for leaf switches
 	SpineBreakout     string // breakout configuration for spine switches
+	LeafServerPorts   string // leaf switch port range for server connections
+	LeafFabricPorts   string // leaf switch port range for fabric connections
+	LeafMclagPorts    string // leaf switch port range for mc-lag peer links
+	SpineFabricPorts  string // spine switch port range for fabric connections
 
 	data         *apiutil.Loader
 	ifaceTracker map[string]uint8 // next available interface ID for each switch
 	switchID     uint             // switch ID counter
 
+	// per-connection-type interface trackers
+	serverIfaceTracker      map[string]uint8 // server connection interface tracker
+	fabricIfaceTracker      map[string]uint8 // fabric connection interface tracker
+	mclagIfaceTracker       map[string]uint8 // mc-lag connection interface tracker
+	vpcLoopbackIfaceTracker map[string]uint8 // vpc loopback interface tracker
+
 	// parsed breakout configurations
 	leafBreakoutConfig  map[uint8]string // port number -> breakout mode
 	spineBreakoutConfig map[uint8]string // port number -> breakout mode
+
+	// parsed port assignment ranges
+	leafServerPortRange  []uint8 // allowed ports for server connections
+	leafFabricPortRange  []uint8 // allowed ports for fabric connections
+	leafMclagPortRange   []uint8 // allowed ports for mc-lag peer links
+	spineFabricPortRange []uint8 // allowed ports for fabric connections
 }
 
 func (b *VLABBuilder) Build(ctx context.Context, l *apiutil.Loader, fabricMode meta.FabricMode, nodes []fabapi.FabNode) error {
@@ -63,6 +79,10 @@ func (b *VLABBuilder) Build(ctx context.Context, l *apiutil.Loader, fabricMode m
 	}
 
 	if err := b.parseBreakoutConfigurations(); err != nil {
+		return err
+	}
+
+	if err := b.parsePortAssignmentRanges(); err != nil {
 		return err
 	}
 
@@ -288,16 +308,16 @@ func (b *VLABBuilder) Build(ctx context.Context, l *apiutil.Loader, fabricMode m
 		sessionLinks := []wiringapi.SwitchToSwitchLink{}
 		for i := uint8(0); i < b.MCLAGSessionLinks; i++ {
 			sessionLinks = append(sessionLinks, wiringapi.SwitchToSwitchLink{
-				Switch1: wiringapi.BasePortName{Port: b.nextSwitchPort(leaf1Name)},
-				Switch2: wiringapi.BasePortName{Port: b.nextSwitchPort(leaf2Name)},
+				Switch1: wiringapi.BasePortName{Port: b.nextSwitchPortForConnection(leaf1Name, ConnTypeMclag)},
+				Switch2: wiringapi.BasePortName{Port: b.nextSwitchPortForConnection(leaf2Name, ConnTypeMclag)},
 			})
 		}
 
 		peerLinks := []wiringapi.SwitchToSwitchLink{}
 		for i := uint8(0); i < b.MCLAGPeerLinks; i++ {
 			peerLinks = append(peerLinks, wiringapi.SwitchToSwitchLink{
-				Switch1: wiringapi.BasePortName{Port: b.nextSwitchPort(leaf1Name)},
-				Switch2: wiringapi.BasePortName{Port: b.nextSwitchPort(leaf2Name)},
+				Switch1: wiringapi.BasePortName{Port: b.nextSwitchPortForConnection(leaf1Name, ConnTypeMclag)},
+				Switch2: wiringapi.BasePortName{Port: b.nextSwitchPortForConnection(leaf2Name, ConnTypeMclag)},
 			})
 		}
 
@@ -587,8 +607,8 @@ func (b *VLABBuilder) Build(ctx context.Context, l *apiutil.Loader, fabricMode m
 
 			links := []wiringapi.FabricLink{}
 			for spinePortID := uint8(0); spinePortID < b.FabricLinksCount; spinePortID++ {
-				spinePort := b.nextSwitchPort(spineName)
-				leafPort := b.nextSwitchPort(leafName)
+				spinePort := b.nextSwitchPortForConnection(spineName, ConnTypeFabric)
+				leafPort := b.nextSwitchPortForConnection(leafName, ConnTypeFabric)
 
 				links = append(links, wiringapi.FabricLink{
 					Spine: wiringapi.ConnFabricLinkSwitch{BasePortName: wiringapi.BasePortName{Port: spinePort}},
@@ -606,7 +626,7 @@ func (b *VLABBuilder) Build(ctx context.Context, l *apiutil.Loader, fabricMode m
 		}
 
 		if isGw && spineID <= b.GatewayUplinks {
-			spinePort := b.nextSwitchPort(spineName)
+			spinePort := b.nextSwitchPortForConnection(spineName, ConnTypeFabric)
 			gwPort := fmt.Sprintf("%s/enp2s%d", gw.Name, spineID)
 
 			if _, err := b.createConnection(ctx, wiringapi.ConnectionSpec{
@@ -638,8 +658,8 @@ func (b *VLABBuilder) Build(ctx context.Context, l *apiutil.Loader, fabricMode m
 			loops := []wiringapi.SwitchToSwitchLink{}
 			for i := uint8(0); i < b.VPCLoopbacks; i++ {
 				loops = append(loops, wiringapi.SwitchToSwitchLink{
-					Switch1: wiringapi.BasePortName{Port: b.nextSwitchPort(sw.Name)},
-					Switch2: wiringapi.BasePortName{Port: b.nextSwitchPort(sw.Name)},
+					Switch1: wiringapi.BasePortName{Port: b.nextSwitchPortForConnection(sw.Name, ConnTypeVPCLoopback)},
+					Switch2: wiringapi.BasePortName{Port: b.nextSwitchPortForConnection(sw.Name, ConnTypeVPCLoopback)},
 				})
 			}
 
@@ -656,59 +676,147 @@ func (b *VLABBuilder) Build(ctx context.Context, l *apiutil.Loader, fabricMode m
 	return nil
 }
 
+// ConnectionType represents the type of connection for port assignment
+type ConnectionType int
+
+const (
+	ConnTypeServer ConnectionType = iota
+	ConnTypeFabric
+	ConnTypeMclag
+	ConnTypeVPCLoopback
+)
+
 func (b *VLABBuilder) nextSwitchPort(switchName string) string {
-	// Initialize tracker if needed
-	if b.ifaceTracker == nil {
-		b.ifaceTracker = make(map[string]uint8)
+	return b.nextSwitchPortForConnection(switchName, ConnTypeServer)
+}
+
+func (b *VLABBuilder) nextSwitchPortForConnection(switchName string, connType ConnectionType) string {
+	// Initialize trackers if needed
+	if b.serverIfaceTracker == nil {
+		b.serverIfaceTracker = make(map[string]uint8)
+	}
+	if b.fabricIfaceTracker == nil {
+		b.fabricIfaceTracker = make(map[string]uint8)
+	}
+	if b.mclagIfaceTracker == nil {
+		b.mclagIfaceTracker = make(map[string]uint8)
+	}
+	if b.vpcLoopbackIfaceTracker == nil {
+		b.vpcLoopbackIfaceTracker = make(map[string]uint8)
 	}
 
-	// Determine which breakout config to use based on switch role
+	// Get the appropriate tracker for this connection type
+	var tracker map[string]uint8
+	switch connType {
+	case ConnTypeServer:
+		tracker = b.serverIfaceTracker
+	case ConnTypeFabric:
+		tracker = b.fabricIfaceTracker
+	case ConnTypeMclag:
+		tracker = b.mclagIfaceTracker
+	case ConnTypeVPCLoopback:
+		tracker = b.vpcLoopbackIfaceTracker
+	default:
+		tracker = b.serverIfaceTracker
+	}
+
+	// Get available logical interfaces for this connection type
+	availableLogicalIfaces := b.getAvailableLogicalInterfaces(switchName, connType)
+
+	// Get next available logical interface index for this switch/connection type
+	logicalIfaceIndex := tracker[switchName]
+
+	// Safety check
+	if int(logicalIfaceIndex) >= len(availableLogicalIfaces) {
+		slog.Error("No more available ports for connection type", "switch", switchName, "connType", connType)
+		// Fallback to a default port
+		portName := fmt.Sprintf("%s/E1/%d", switchName, logicalIfaceIndex+1)
+		tracker[switchName] = logicalIfaceIndex + 1
+		return portName
+	}
+
+	// Get the port name for this logical interface
+	portName := availableLogicalIfaces[logicalIfaceIndex]
+	tracker[switchName] = logicalIfaceIndex + 1
+	return portName
+}
+
+// getAvailableLogicalInterfaces returns the available logical interfaces for a switch and connection type
+func (b *VLABBuilder) getAvailableLogicalInterfaces(switchName string, connType ConnectionType) []string {
+	// Determine which breakout config and port range to use based on switch role and connection type
 	var breakoutConfig map[uint8]string
-	if strings.Contains(switchName, "spine") {
+	var allowedPorts []uint8
+	isSpine := strings.Contains(switchName, "spine")
+
+	if isSpine {
 		breakoutConfig = b.spineBreakoutConfig
+		if connType == ConnTypeFabric {
+			allowedPorts = b.spineFabricPortRange
+		}
 	} else {
 		breakoutConfig = b.leafBreakoutConfig
+		switch connType {
+		case ConnTypeServer:
+			if len(b.leafServerPortRange) > 0 {
+				allowedPorts = b.leafServerPortRange
+			} else {
+				allowedPorts = b.getDefaultPortRangeForConnectionType(ConnTypeServer)
+			}
+		case ConnTypeFabric:
+			if len(b.leafFabricPortRange) > 0 {
+				allowedPorts = b.leafFabricPortRange
+			} else {
+				allowedPorts = b.getDefaultPortRangeForConnectionType(ConnTypeFabric)
+			}
+		case ConnTypeMclag:
+			if len(b.leafMclagPortRange) > 0 {
+				allowedPorts = b.leafMclagPortRange
+			} else {
+				allowedPorts = b.getDefaultPortRangeForConnectionType(ConnTypeMclag)
+			}
+		case ConnTypeVPCLoopback:
+			// VPC loopback always uses default allocation
+			allowedPorts = b.getDefaultPortRangeForConnectionType(ConnTypeVPCLoopback)
+		}
 	}
 
-	// Get next available logical interface for this switch
-	logicalIface := b.ifaceTracker[switchName]
-
-	// Walk through physical ports to find where this logical interface maps
-	currentLogicalIface := uint8(0)
+	var logicalIfaces []string
 	physicalPort := uint8(1)
 
-	for {
+	// Walk through all possible physical ports
+	for physicalPort <= 64 {
+		// Skip this physical port if it's not in the allowed range
+		if len(allowedPorts) > 0 && !b.isPortInRange(physicalPort, allowedPorts) {
+			physicalPort++
+			continue
+		}
+
 		if breakoutMode, hasBreakout := breakoutConfig[physicalPort]; hasBreakout {
 			// This physical port has breakout
 			subPortCount := b.getBreakoutSubPortCount(breakoutMode)
-
-			if currentLogicalIface+subPortCount > logicalIface {
-				// We're in this breakout port's range
-				subPortIndex := logicalIface - currentLogicalIface + 1 // 1-based
+			for subPortIndex := uint8(1); subPortIndex <= subPortCount; subPortIndex++ {
 				portName := fmt.Sprintf("%s/E1/%d/%d", switchName, physicalPort, subPortIndex)
-				b.ifaceTracker[switchName] = logicalIface + 1
-				return portName
+				logicalIfaces = append(logicalIfaces, portName)
 			}
-			currentLogicalIface += subPortCount
 		} else {
 			// Regular port (no breakout)
-			if currentLogicalIface == logicalIface {
-				portName := fmt.Sprintf("%s/E1/%d", switchName, physicalPort)
-				b.ifaceTracker[switchName] = logicalIface + 1
-				return portName
-			}
-			currentLogicalIface++
+			portName := fmt.Sprintf("%s/E1/%d", switchName, physicalPort)
+			logicalIfaces = append(logicalIfaces, portName)
 		}
 		physicalPort++
+	}
 
-		// Safety check to prevent infinite loop
-		if physicalPort > 64 {
-			slog.Error("Too many interfaces for switch", "switch", switchName)
-			portName := fmt.Sprintf("%s/E1/%d", switchName, physicalPort)
-			b.ifaceTracker[switchName] = logicalIface + 1
-			return portName
+	return logicalIfaces
+}
+
+// isPortInRange checks if a port number is in the allowed range
+func (b *VLABBuilder) isPortInRange(port uint8, allowedPorts []uint8) bool {
+	for _, allowedPort := range allowedPorts {
+		if port == allowedPort {
+			return true
 		}
 	}
+	return false
 }
 
 // getBreakoutSubPortCount returns the number of sub-ports for a given breakout mode
@@ -1016,4 +1124,216 @@ func (b *VLABBuilder) createConnection(ctx context.Context, spec wiringapi.Conne
 	}
 
 	return conn, nil
+}
+
+// parsePortAssignmentRanges parses the port assignment range specifications
+func (b *VLABBuilder) parsePortAssignmentRanges() error {
+	var err error
+
+	// Parse leaf server port range
+	if b.LeafServerPorts != "" {
+		b.leafServerPortRange, err = b.parsePortRange(b.LeafServerPorts)
+		if err != nil {
+			return fmt.Errorf("invalid leaf server port range: %w", err) //nolint:goerr113
+		}
+	}
+
+	// Parse leaf fabric port range
+	if b.LeafFabricPorts != "" {
+		b.leafFabricPortRange, err = b.parsePortRange(b.LeafFabricPorts)
+		if err != nil {
+			return fmt.Errorf("invalid leaf fabric port range: %w", err) //nolint:goerr113
+		}
+	}
+
+	// Parse leaf mc-lag port range
+	if b.LeafMclagPorts != "" {
+		b.leafMclagPortRange, err = b.parsePortRange(b.LeafMclagPorts)
+		if err != nil {
+			return fmt.Errorf("invalid leaf mc-lag port range: %w", err) //nolint:goerr113
+		}
+	}
+
+	// Parse spine fabric port range
+	if b.SpineFabricPorts != "" {
+		b.spineFabricPortRange, err = b.parsePortRange(b.SpineFabricPorts)
+		if err != nil {
+			return fmt.Errorf("invalid spine fabric port range: %w", err) //nolint:goerr113
+		}
+	}
+
+	return nil
+}
+
+// parsePortRange parses a port range specification like "1-24" or "1,3,5-8,10"
+func (b *VLABBuilder) parsePortRange(spec string) ([]uint8, error) {
+	if spec == "" {
+		return nil, nil
+	}
+
+	var ports []uint8
+	ranges := strings.Split(spec, ",")
+
+	for _, rangeSpec := range ranges {
+		rangeSpec = strings.TrimSpace(rangeSpec)
+		if rangeSpec == "" {
+			continue
+		}
+
+		if strings.Contains(rangeSpec, "-") {
+			// Range like "1-24"
+			parts := strings.Split(rangeSpec, "-")
+			if len(parts) != 2 {
+				return nil, fmt.Errorf("invalid range format '%s': expected 'start-end'", rangeSpec) //nolint:goerr113
+			}
+
+			start, err := strconv.ParseUint(strings.TrimSpace(parts[0]), 10, 8)
+			if err != nil {
+				return nil, fmt.Errorf("invalid start port '%s': %w", parts[0], err) //nolint:goerr113
+			}
+
+			end, err := strconv.ParseUint(strings.TrimSpace(parts[1]), 10, 8)
+			if err != nil {
+				return nil, fmt.Errorf("invalid end port '%s': %w", parts[1], err) //nolint:goerr113
+			}
+
+			if start > end {
+				return nil, fmt.Errorf("invalid range: start port %d > end port %d", start, end) //nolint:goerr113
+			}
+
+			for i := start; i <= end; i++ {
+				ports = append(ports, uint8(i)) //nolint:gosec
+			}
+		} else {
+			// Single port like "5"
+			port, err := strconv.ParseUint(rangeSpec, 10, 8)
+			if err != nil {
+				return nil, fmt.Errorf("invalid port '%s': %w", rangeSpec, err) //nolint:goerr113
+			}
+			ports = append(ports, uint8(port)) //nolint:gosec
+		}
+	}
+
+	return ports, nil
+}
+
+// getRemainingPortRange returns ports that are not explicitly assigned to other connection types
+func (b *VLABBuilder) getRemainingPortRange(excludeConnType ConnectionType) []uint8 {
+	var remainingPorts []uint8
+
+	// Collect all explicitly assigned ports from other connection types
+	usedPorts := make(map[uint8]bool)
+
+	// Add server ports if they are explicitly specified and not the current type
+	if excludeConnType != ConnTypeServer && len(b.leafServerPortRange) > 0 {
+		for _, port := range b.leafServerPortRange {
+			usedPorts[port] = true
+		}
+	}
+
+	// Add fabric ports if they are explicitly specified and not the current type
+	if excludeConnType != ConnTypeFabric && len(b.leafFabricPortRange) > 0 {
+		for _, port := range b.leafFabricPortRange {
+			usedPorts[port] = true
+		}
+	}
+
+	// Add mc-lag ports if they are explicitly specified and not the current type
+	if excludeConnType != ConnTypeMclag && len(b.leafMclagPortRange) > 0 {
+		for _, port := range b.leafMclagPortRange {
+			usedPorts[port] = true
+		}
+	}
+
+	// Find unused ports in a conservative range (1-32 for most switches)
+	for port := uint8(1); port <= 32; port++ {
+		if !usedPorts[port] {
+			remainingPorts = append(remainingPorts, port)
+		}
+	}
+
+	return remainingPorts
+}
+
+// getDefaultPortRangeForConnectionType returns default port ranges for connection types when not explicitly specified
+func (b *VLABBuilder) getDefaultPortRangeForConnectionType(connType ConnectionType) []uint8 {
+	// Get all remaining ports (not explicitly assigned to any connection type)
+	remainingPorts := b.getRemainingPortRange(connType)
+
+	// If no remaining ports, return empty
+	if len(remainingPorts) == 0 {
+		return []uint8{}
+	}
+
+	// Count how many connection types need default allocations
+	needsDefault := 0
+	if len(b.leafServerPortRange) == 0 {
+		needsDefault++
+	}
+	if len(b.leafFabricPortRange) == 0 {
+		needsDefault++
+	}
+	if len(b.leafMclagPortRange) == 0 {
+		needsDefault++
+	}
+	// VPC loopback always needs allocation
+	needsDefault++
+
+	// If only one type needs allocation, give it all remaining ports
+	if needsDefault <= 1 {
+		return remainingPorts
+	}
+
+	// Distribute remaining ports among connection types that need defaults
+	portsPerType := len(remainingPorts) / needsDefault
+	if portsPerType < 2 {
+		portsPerType = 2 // Minimum 2 ports per type
+	}
+
+	// Allocate ranges based on connection type priority
+	allocationIndex := 0
+	if len(b.leafServerPortRange) == 0 {
+		switch connType {
+		case ConnTypeServer:
+			end := allocationIndex + portsPerType
+			if end > len(remainingPorts) {
+				end = len(remainingPorts)
+			}
+			return remainingPorts[allocationIndex:end]
+		}
+		allocationIndex += portsPerType
+	}
+
+	if len(b.leafFabricPortRange) == 0 {
+		switch connType {
+		case ConnTypeFabric:
+			end := allocationIndex + portsPerType
+			if end > len(remainingPorts) {
+				end = len(remainingPorts)
+			}
+			return remainingPorts[allocationIndex:end]
+		}
+		allocationIndex += portsPerType
+	}
+
+	if len(b.leafMclagPortRange) == 0 {
+		switch connType {
+		case ConnTypeMclag:
+			end := allocationIndex + portsPerType
+			if end > len(remainingPorts) {
+				end = len(remainingPorts)
+			}
+			return remainingPorts[allocationIndex:end]
+		}
+		allocationIndex += portsPerType
+	}
+
+	// VPC loopback gets the remaining ports
+	if connType == ConnTypeVPCLoopback {
+		if allocationIndex < len(remainingPorts) {
+			return remainingPorts[allocationIndex:]
+		}
+	}
+
+	return []uint8{}
 }

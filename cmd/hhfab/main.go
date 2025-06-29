@@ -173,6 +173,7 @@ func Run(ctx context.Context) error {
 	var wgGatewayUplinks uint
 	var wgLeafProfile, wgSpineProfile string
 	var wgLeafBreakout, wgSpineBreakout string
+	var wgLeafServerPorts, wgLeafFabricPorts, wgLeafMclagPorts, wgSpineFabricPorts string
 	vlabWiringGenFlags := []cli.Flag{
 		&cli.UintFlag{
 			Name:        "spines-count",
@@ -271,6 +272,26 @@ func Run(ctx context.Context) error {
 			Name:        "spine-breakout",
 			Usage:       "spine switch breakout configuration (e.g., \"1-4:4x25G\")",
 			Destination: &wgSpineBreakout,
+		},
+		&cli.StringFlag{
+			Name:        "leaf-server-ports",
+			Usage:       "leaf switch port range for server connections (e.g., \"1-24\")",
+			Destination: &wgLeafServerPorts,
+		},
+		&cli.StringFlag{
+			Name:        "leaf-fabric-ports",
+			Usage:       "leaf switch port range for fabric uplink connections (e.g., \"25-28\")",
+			Destination: &wgLeafFabricPorts,
+		},
+		&cli.StringFlag{
+			Name:        "leaf-mclag-ports",
+			Usage:       "leaf switch port range for MCLAG peer/session links (e.g., \"29-32\")",
+			Destination: &wgLeafMclagPorts,
+		},
+		&cli.StringFlag{
+			Name:        "spine-fabric-ports",
+			Usage:       "spine switch port range for fabric downlink connections (e.g., \"1-32\")",
+			Destination: &wgSpineFabricPorts,
 		},
 	}
 
@@ -723,6 +744,10 @@ func Run(ctx context.Context) error {
 								SpineProfile:      wgSpineProfile,
 								LeafBreakout:      wgLeafBreakout,
 								SpineBreakout:     wgSpineBreakout,
+								LeafServerPorts:   wgLeafServerPorts,
+								LeafFabricPorts:   wgLeafFabricPorts,
+								LeafMclagPorts:    wgLeafMclagPorts,
+								SpineFabricPorts:  wgSpineFabricPorts,
 							}
 
 							if err := hhfab.VLABGenerate(ctx, workDir, cacheDir, builder, hhfab.DefaultVLABGeneratedFile); err != nil {
