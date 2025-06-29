@@ -921,6 +921,24 @@ func (b *VLABBuilder) createSwitch(ctx context.Context, name string, spec wiring
 	spec.Boot.MAC = fmt.Sprintf(VLABSwitchMACTmpl, b.switchID)
 	b.switchID++
 
+	// Add port breakouts if configured
+	var breakoutConfig map[uint8]string
+	if strings.Contains(name, "spine") {
+		breakoutConfig = b.spineBreakoutConfig
+	} else {
+		breakoutConfig = b.leafBreakoutConfig
+	}
+
+	if len(breakoutConfig) > 0 {
+		if spec.PortBreakouts == nil {
+			spec.PortBreakouts = make(map[string]string)
+		}
+		for port, mode := range breakoutConfig {
+			portName := fmt.Sprintf("E1/%d", port)
+			spec.PortBreakouts[portName] = mode
+		}
+	}
+
 	sw := &wiringapi.Switch{
 		TypeMeta: kmetav1.TypeMeta{
 			Kind:       wiringapi.KindSwitch,
