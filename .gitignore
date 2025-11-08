@@ -10,6 +10,11 @@ lcov.info
 *.dll
 *.so
 *.dylib
+
+# Local agent guidance / secrets
+CLAUDE.md
+AGENTS.md
+.env
 bin/*
 Dockerfile.cross
 
