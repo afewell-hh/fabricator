@@ -157,6 +157,7 @@ jobs:
       - name: (${{ inputs.upgradefrom }}) Init hhfab for hybrid mode
         if: ${{ inputs.upgradefrom != '' && inputs.hybrid }}
         run: |
+          # shellcheck disable=SC1090
           source "./lab-ci/envs/$KUBE_NODE/source.sh"
 
           old/hhfab init -v --dev \
@@ -177,6 +178,7 @@ jobs:
       - name: (${{ inputs.upgradefrom }}) Run and test ${{ inputs.hybrid && 'hybrid ' || '' }}VLAB
         if: ${{ inputs.upgradefrom != '' }}
         run: |
+          # shellcheck disable=SC2155
           export HHFAB_JOIN_TOKEN=$(openssl rand -base64 24)
           old/hhfab vlab up -v \
             --build-mode="${{ inputs.buildmode }}" \
@@ -221,6 +223,7 @@ jobs:
       - name: Init hhfab for hybrid mode
         if: ${{ inputs.upgradefrom == '' && inputs.hybrid }}
         run: |
+          # shellcheck disable=SC1090
           source "./lab-ci/envs/$KUBE_NODE/source.sh"
           bin/hhfab init -v --dev \
             --fabric-mode=${{ inputs.fabricmode }} \
@@ -239,6 +242,7 @@ jobs:
       # TODO: make controls restricted again when we figure out how to get NTP upstream working for isolated VMs
       - name: ${{ inputs.upgradefrom != '' && 'Upgrade' || 'Run' }} and test ${{ inputs.hybrid && 'hybrid ' || '' }}VLAB
         run: |
+          # shellcheck disable=SC2155
           export HHFAB_JOIN_TOKEN=$(openssl rand -base64 24)
           bin/hhfab vlab up -v \
             --build-mode="${{ inputs.buildmode }}" \
@@ -275,6 +279,7 @@ jobs:
       - name: (After) Run ${{ inputs.hybrid && 'hybrid ' || '' }}VLAB one more time
         if: ${{ inputs.upgradefrom != '' }}
         run: |
+          # shellcheck disable=SC2155
           export HHFAB_JOIN_TOKEN=$(openssl rand -base64 24)
           bin/hhfab vlab up -v \
             --build-mode="${{ inputs.buildmode }}" \
